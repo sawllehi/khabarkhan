@@ -20,8 +20,8 @@ const cfg = JSON.parse(await readFile(path.join(ROOT, 'feeds.json'), 'utf8'));
 const BASE = process.env.BASE ?? cfg.base ?? '';
 const AI_KEY = process.env.GEMINI_API_KEY || '';
 // Free tier returns 503 when a model is busy, so keep a fallback order.
-const AI_MODELS = (process.env.GEMINI_MODEL || cfg.aiModel || 'gemini-3.6-flash').split(',');
-const REWRITE_PER_RUN = Number(process.env.REWRITE_PER_RUN || cfg.rewritePerRun || 20);
+const AI_MODELS = (process.env.GEMINI_MODEL || cfg.aiModel || 'gemini-3.6-flash,gemini-3.7-flash,gemini-3.8-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash-lite').split(',');
+const REWRITE_PER_RUN = Number(process.env.REWRITE_PER_RUN || cfg.rewritePerRun || 40);
 const PER_PAGE = 40;
 const UA = 'Mozilla/5.0 (compatible; NewsReader/1.0)';
 // Article pages are pickier than feeds: yjc.ir and khabaronline reject anything that
@@ -160,24 +160,33 @@ async function callModel(model, prompt) {
   return data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
 }
 
+// Each model has its own small free daily allowance, so when one runs out we
+// move to the next instead of stopping for the day.
+const exhausted = new Set();
+
 async function rewriteWithAI(title, text) {
   const prompt = `${PROMPT}${title}\n\nمتن خبر:\n${text}`;
   let lastErr;
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     for (const model of AI_MODELS) {
+      if (exhausted.has(model)) continue;
       try {
         const raw = await callModel(model, prompt);
         const out = JSON.parse(raw);
         if (!out.title || !out.body || out.body.length < 200) throw new Error('AI returned too little');
         return { title: String(out.title).trim(), body: String(out.body).trim() };
       } catch (e) {
-        if (e.quota) throw e;
+        if (e.quota) {
+          exhausted.add(model);
+          continue;
+        }
         lastErr = e;
-        if (e.busy) await new Promise((r) => setTimeout(r, 2500));
+        if (e.busy) await new Promise((r) => setTimeout(r, 2000));
       }
     }
   }
-  throw lastErr;
+  if (AI_MODELS.every((m) => exhausted.has(m))) throw Object.assign(new Error('quota'), { quota: true });
+  throw lastErr || new Error('unknown AI failure');
 }
 
 /* ---------------------------------------------------------------- dedupe */
@@ -480,7 +489,7 @@ if (AI_KEY) {
       it.excerpt = out.body.replace(/\s+/g, ' ').slice(0, 300);
       if (!it.image && art.image) it.image = art.image;
       console.log(`  ✓ ${out.title.slice(0, 48)}`);
-      await new Promise((r) => setTimeout(r, 4000)); // stay inside the free tier's rate limit
+      await new Promise((r) => setTimeout(r, 1500)); // stay inside the free tier's rate limit
     } catch (e) {
       if (e.quota) {
         console.log('  … سهمیه رایگان امروز تمام شد، بقیه در اجرای بعدی');
@@ -496,15 +505,18 @@ if (AI_KEY) {
 
 const all = [...byId.values()].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, cfg.maxArchive);
 await writeFile(ARCHIVE, JSON.stringify(all, null, 1), 'utf8');
-console.log(`${added} خبر تازه · ${all.length} خبر در آرشیو`);
+// Only stories we have rewritten go on the site. The rest stay in the archive
+// waiting their turn, so nothing published is somebody else's text.
+const pub = all.filter((it) => it.body);
+console.log(`${added} خبر تازه · ${all.length} در آرشیو · ${pub.length} بازنویسی‌شده و منتشر`);
 
 if (existsSync(OUT)) await rm(OUT, { recursive: true });
-const cats = [...new Set(all.map((i) => i.category))];
+const cats = [...new Set(pub.map((i) => i.category))];
 
 // homepage + pagination
-const pages = Math.max(1, Math.ceil(all.length / PER_PAGE));
+const pages = Math.max(1, Math.ceil(pub.length / PER_PAGE));
 for (let p = 1; p <= Math.min(pages, 12); p++) {
-  const slice = all.slice((p - 1) * PER_PAGE, p * PER_PAGE);
+  const slice = pub.slice((p - 1) * PER_PAGE, p * PER_PAGE);
   const html = listPage({
     items: slice,
     cats,
@@ -519,18 +531,18 @@ for (let p = 1; p <= Math.min(pages, 12); p++) {
 
 // category pages
 for (const c of cats) {
-  const items = all.filter((i) => i.category === c).slice(0, PER_PAGE * 3);
+  const items = pub.filter((i) => i.category === c).slice(0, PER_PAGE * 3);
   await write(path.join(OUT, 'c', c, 'index.html'), listPage({ items, cats, active: c, title: c, description: `اخبار ${c}` }));
 }
 
 // article pages
-for (const it of all) {
-  const related = all.filter((x) => x.category === it.category && x.id !== it.id).slice(0, 6);
+for (const it of pub) {
+  const related = pub.filter((x) => x.category === it.category && x.id !== it.id).slice(0, 6);
   await write(path.join(OUT, 'n', `${it.id}.html`), articlePage(it, related, cats));
 }
 
 // rss + sitemap + robots
-const rssItems = all
+const rssItems = pub
   .slice(0, 50)
   .map(
     (it) => `  <item>
@@ -560,7 +572,7 @@ await write(
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>${cfg.siteUrl}/</loc></url>
 ${cats.map((c) => `  <url><loc>${cfg.siteUrl}/c/${encodeURIComponent(c)}/</loc></url>`).join('\n')}
-${all.slice(0, 1000).map((it) => `  <url><loc>${cfg.siteUrl}/n/${it.id}.html</loc><lastmod>${it.date.slice(0, 10)}</lastmod></url>`).join('\n')}
+${pub.slice(0, 1000).map((it) => `  <url><loc>${cfg.siteUrl}/n/${it.id}.html</loc><lastmod>${it.date.slice(0, 10)}</lastmod></url>`).join('\n')}
 </urlset>`
 );
 
