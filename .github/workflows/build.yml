@@ -2,7 +2,7 @@ name: build and publish
 
 on:
   schedule:
-    - cron: '*/30 * * * *'   # every 30 minutes
+    - cron: '17 * * * *'   # hourly, on the 17th minute
   workflow_dispatch:
 
 permissions:
@@ -27,6 +27,7 @@ jobs:
       - name: Fetch feeds and render the site
         env:
           BASE: /${{ github.event.repository.name }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: node build.mjs
 
       - name: Keep the archive

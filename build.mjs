@@ -18,8 +18,15 @@ const ARCHIVE = path.join(ROOT, 'archive.json');
 
 const cfg = JSON.parse(await readFile(path.join(ROOT, 'feeds.json'), 'utf8'));
 const BASE = process.env.BASE ?? cfg.base ?? '';
+const AI_KEY = process.env.GEMINI_API_KEY || '';
+const AI_MODEL = process.env.GEMINI_MODEL || cfg.aiModel || 'gemini-2.5-flash';
+const REWRITE_PER_RUN = Number(process.env.REWRITE_PER_RUN || cfg.rewritePerRun || 12);
 const PER_PAGE = 40;
 const UA = 'Mozilla/5.0 (compatible; NewsReader/1.0)';
+// Article pages are pickier than feeds: yjc.ir and khabaronline reject anything that
+// doesn't look like a browser. isna.ir and irna.ir sit behind an interstitial for
+// non-Iranian IPs, so their full text only becomes reachable once hosting is in Iran.
+const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 /* ---------------------------------------------------------------- fetching */
 
@@ -93,6 +100,66 @@ function parseItems(xml, feed) {
     });
   }
   return out;
+}
+
+/* --------------------------------------------- full article + AI rewrite */
+
+// The feeds only carry a summary. Pull the real body text off the source page.
+async function fetchArticle(url) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 25000);
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'fa,en;q=0.8' },
+      signal: ctrl.signal,
+      redirect: 'follow',
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const html = await res.text();
+    const clean = html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<figure[\s\S]*?<\/figure>/gi, ' ');
+    const paras = [...clean.matchAll(/<p(?:\s[^>]*)?>([\s\S]*?)<\/p>/gi)]
+      .map((m) => stripTags(m[1]))
+      .filter((t) => t.length > 60 && !/^(کد خبر|انتهای پیام|منبع|copyright)/i.test(t));
+    const ogImage = clean.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)?.[1] || '';
+    return { text: paras.join('\n\n').slice(0, 6000), image: decode(ogImage) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const PROMPT = `تو یک خبرنگار فارسی‌زبان هستی. متن خبر زیر را بازنویسی کن.
+
+قواعد:
+- کاملاً با کلمات و ساختار جمله‌های خودت بنویس، نه کپی متن اصلی.
+- هیچ واقعیت، عدد، نام، تاریخ یا نقل‌قولی را تغییر نده و چیزی از خودت اضافه نکن.
+- لحن خبری و بی‌طرف باشد. بدون نظر شخصی و بدون تبلیغ.
+- سه تا پنج پاراگراف کوتاه.
+- یک تیتر تازه بنویس که معنی همان خبر را برساند ولی عین تیتر اصلی نباشد.
+- نام خبرگزاری یا وب‌سایت را داخل متن نیاور.
+- خروجی فقط JSON باشد: {"title": "...", "body": "پاراگراف‌ها با \\n\\n جدا شوند"}
+
+تیتر اصلی: `;
+
+async function rewriteWithAI(title, text) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${AI_MODEL}:generateContent?key=${AI_KEY}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: `${PROMPT}${title}\n\nمتن خبر:\n${text}` }] }],
+      generationConfig: { temperature: 0.5, responseMimeType: 'application/json', maxOutputTokens: 2048 },
+    }),
+  });
+  if (res.status === 429) throw Object.assign(new Error('quota'), { quota: true });
+  if (!res.ok) throw new Error(`AI HTTP ${res.status}: ${(await res.text()).slice(0, 160)}`);
+  const data = await res.json();
+  const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const out = JSON.parse(raw);
+  if (!out.title || !out.body || out.body.length < 200) throw new Error('AI returned too little');
+  return { title: String(out.title).trim(), body: String(out.body).trim() };
 }
 
 /* ---------------------------------------------------------------- dedupe */
@@ -319,10 +386,13 @@ function articlePage(it, related, cats) {
   <div class="meta"><span class="src">${esc(it.source)}</span><span class="cat">${esc(it.category)}</span><span>${faDate(it.date)}</span></div>
   <h1>${esc(it.title)}</h1>
   ${it.image ? `<div class="hero"><img src="${esc(it.image)}" alt=""></div>` : ''}
-  <div class="text"><p>${esc(it.excerpt)}</p></div>
+  <div class="text">${(it.body || it.excerpt)
+    .split(/\n{2,}/)
+    .map((para) => `<p>${esc(para.trim())}</p>`)
+    .join('\n')}</div>
   <div class="sourcebox">
-    این خبر از <b>${esc(it.source)}</b> منتشر شده است.
-    <a href="${esc(it.link)}" target="_blank" rel="noopener nofollow">خواندن متن کامل در ${esc(it.source)}</a>
+    ${it.body ? 'این خبر بر پایهٔ گزارش' : 'خلاصهٔ این خبر از'} <b>${esc(it.source)}</b> ${it.body ? 'تهیه شده است.' : 'منتشر شده است.'}
+    <a href="${esc(it.link)}" target="_blank" rel="noopener nofollow">مشاهدهٔ خبر در ${esc(it.source)}</a>
   </div>
   <div class="more">
     <div class="section-head"><h2>خبرهای مرتبط</h2><span class="rule"></span></div>
@@ -370,6 +440,40 @@ for (const it of fresh) {
   byId.set(it.id, it);
   seenTitles.add(k);
   added++;
+}
+
+// Rewrite the newest stories that have not been rewritten yet.
+// Only new ones cost anything, so a run is cheap once the archive is warm.
+if (AI_KEY) {
+  const queue = [...byId.values()]
+    .filter((it) => !it.body && !it.aiFailed)
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
+    .slice(0, REWRITE_PER_RUN);
+  console.log(`بازنویسی ${queue.length} خبر…`);
+  for (const it of queue) {
+    try {
+      const art = await fetchArticle(it.link);
+      const source = art.text.length > 400 ? art.text : it.excerpt;
+      if (source.length < 180) throw new Error('متن کافی نبود');
+      const out = await rewriteWithAI(it.title, source);
+      it.originalTitle = it.title;
+      it.title = out.title;
+      it.body = out.body;
+      it.excerpt = out.body.replace(/\s+/g, ' ').slice(0, 300);
+      if (!it.image && art.image) it.image = art.image;
+      console.log(`  ✓ ${out.title.slice(0, 48)}`);
+      await new Promise((r) => setTimeout(r, 4000)); // stay inside the free tier's rate limit
+    } catch (e) {
+      if (e.quota) {
+        console.log('  … سهمیه رایگان امروز تمام شد، بقیه در اجرای بعدی');
+        break;
+      }
+      it.aiFailed = (it.aiFailed || 0) + 1;
+      console.log(`  ✗ ${e.message}`);
+    }
+  }
+} else {
+  console.log('بدون کلید هوش مصنوعی — فقط خلاصهٔ خبرگزاری نمایش داده می‌شود.');
 }
 
 const all = [...byId.values()].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, cfg.maxArchive);
