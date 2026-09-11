@@ -19,7 +19,8 @@ const ARCHIVE = path.join(ROOT, 'archive.json');
 const cfg = JSON.parse(await readFile(path.join(ROOT, 'feeds.json'), 'utf8'));
 const BASE = process.env.BASE ?? cfg.base ?? '';
 const AI_KEY = process.env.GEMINI_API_KEY || '';
-const AI_MODEL = process.env.GEMINI_MODEL || cfg.aiModel || 'gemini-2.5-flash';
+// Free tier returns 503 when a model is busy, so keep a fallback order.
+const AI_MODELS = (process.env.GEMINI_MODEL || cfg.aiModel || 'gemini-3.6-flash').split(',');
 const REWRITE_PER_RUN = Number(process.env.REWRITE_PER_RUN || cfg.rewritePerRun || 12);
 const PER_PAGE = 40;
 const UA = 'Mozilla/5.0 (compatible; NewsReader/1.0)';
@@ -143,23 +144,40 @@ const PROMPT = `تو یک خبرنگار فارسی‌زبان هستی. متن 
 
 تیتر اصلی: `;
 
-async function rewriteWithAI(title, text) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${AI_MODEL}:generateContent?key=${AI_KEY}`;
-  const res = await fetch(url, {
+async function callModel(model, prompt) {
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/${model}:generateContent`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': AI_KEY },
     body: JSON.stringify({
-      contents: [{ parts: [{ text: `${PROMPT}${title}\n\nمتن خبر:\n${text}` }] }],
-      generationConfig: { temperature: 0.5, responseMimeType: 'application/json', maxOutputTokens: 2048 },
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.5, responseMimeType: 'application/json', maxOutputTokens: 8192 },
     }),
   });
   if (res.status === 429) throw Object.assign(new Error('quota'), { quota: true });
-  if (!res.ok) throw new Error(`AI HTTP ${res.status}: ${(await res.text()).slice(0, 160)}`);
+  if (res.status === 503 || res.status === 404) throw Object.assign(new Error(`busy ${res.status}`), { busy: true });
+  if (!res.ok) throw new Error(`AI HTTP ${res.status}: ${(await res.text()).slice(0, 140)}`);
   const data = await res.json();
-  const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  const out = JSON.parse(raw);
-  if (!out.title || !out.body || out.body.length < 200) throw new Error('AI returned too little');
-  return { title: String(out.title).trim(), body: String(out.body).trim() };
+  return data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+}
+
+async function rewriteWithAI(title, text) {
+  const prompt = `${PROMPT}${title}\n\nمتن خبر:\n${text}`;
+  let lastErr;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    for (const model of AI_MODELS) {
+      try {
+        const raw = await callModel(model, prompt);
+        const out = JSON.parse(raw);
+        if (!out.title || !out.body || out.body.length < 200) throw new Error('AI returned too little');
+        return { title: String(out.title).trim(), body: String(out.body).trim() };
+      } catch (e) {
+        if (e.quota) throw e;
+        lastErr = e;
+        if (e.busy) await new Promise((r) => setTimeout(r, 2500));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 /* ---------------------------------------------------------------- dedupe */
