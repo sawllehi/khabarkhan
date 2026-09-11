@@ -1,0 +1,17 @@
+{
+  "siteName": "خبرخوان",
+  "siteTagline": "آخرین خبرها، یکجا",
+  "siteUrl": "https://example.ir",
+  "maxArchive": 3000,
+  "feeds": [
+    { "id": "isna",      "name": "ایسنا",            "url": "https://www.isna.ir/rss",              "category": "عمومی" },
+    { "id": "irna",      "name": "ایرنا",            "url": "https://www.irna.ir/rss",              "category": "عمومی" },
+    { "id": "mehr",      "name": "مهر",              "url": "https://www.mehrnews.com/rss",         "category": "عمومی" },
+    { "id": "khabar",    "name": "خبرآنلاین",        "url": "https://www.khabaronline.ir/rss",      "category": "عمومی" },
+    { "id": "yjc",       "name": "باشگاه خبرنگاران", "url": "https://www.yjc.ir/fa/rss/allnews",    "category": "عمومی" },
+    { "id": "eghtesad",  "name": "اقتصاد آنلاین",    "url": "https://www.eghtesadonline.com/rss",   "category": "اقتصاد" },
+    { "id": "donya",     "name": "دنیای اقتصاد",     "url": "https://donya-e-eqtesad.com/rss",      "category": "اقتصاد" },
+    { "id": "zoomit",    "name": "زومیت",            "url": "https://www.zoomit.ir/feed/",          "category": "فناوری" },
+    { "id": "digiato",   "name": "دیجیاتو",          "url": "https://digiato.com/feed",             "category": "فناوری" }
+  ]
+}
