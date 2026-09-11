@@ -21,7 +21,7 @@ const BASE = process.env.BASE ?? cfg.base ?? '';
 const AI_KEY = process.env.GEMINI_API_KEY || '';
 // Free tier returns 503 when a model is busy, so keep a fallback order.
 const AI_MODELS = (process.env.GEMINI_MODEL || cfg.aiModel || 'gemini-3.6-flash').split(',');
-const REWRITE_PER_RUN = Number(process.env.REWRITE_PER_RUN || cfg.rewritePerRun || 12);
+const REWRITE_PER_RUN = Number(process.env.REWRITE_PER_RUN || cfg.rewritePerRun || 20);
 const PER_PAGE = 40;
 const UA = 'Mozilla/5.0 (compatible; NewsReader/1.0)';
 // Article pages are pickier than feeds: yjc.ir and khabaronline reject anything that
@@ -464,7 +464,7 @@ for (const it of fresh) {
 // Only new ones cost anything, so a run is cheap once the archive is warm.
 if (AI_KEY) {
   const queue = [...byId.values()]
-    .filter((it) => !it.body && !it.aiFailed)
+    .filter((it) => !it.body && (it.aiFailed || 0) < 3)
     .sort((a, b) => new Date(b.date) - new Date(a.date))
     .slice(0, REWRITE_PER_RUN);
   console.log(`بازنویسی ${queue.length} خبر…`);
